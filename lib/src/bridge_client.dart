@@ -36,6 +36,11 @@ class BridgeClient {
   final _statusNotifier = ValueNotifier<BridgeStatus>(BridgeStatus.disconnected);
   ValueListenable<BridgeStatus> get status => _statusNotifier;
 
+  /// True only while at least one dashboard editor is watching this session.
+  /// On-device edit affordances (selection, drag handles, outlines) gate on
+  /// this — so the moment you close the dashboard, the app stops being editable.
+  final editorPresent = ValueNotifier<bool>(false);
+
   final _messageController = StreamController<Map<String, dynamic>>.broadcast();
   Stream<Map<String, dynamic>> get messages => _messageController.stream;
 
@@ -160,6 +165,13 @@ class BridgeClient {
     _send({'type': MessageType.autoLayout, 'appId': config.appId, ...payload});
   }
 
+  /// Stream a PNG screenshot of the running app so the dashboard can mirror the
+  /// live screen with no adb/scrcpy (works on cloud, any device). [payload] is
+  /// { screen, png (base64), w, h }.
+  void reportAppFrame(Map<String, dynamic> payload) {
+    _send({'type': MessageType.appFrame, 'appId': config.appId, ...payload});
+  }
+
   /// Broadcast a node selection for collaboration/highlighting.
   void select(String screen, String? nodeId) {
     _send({
@@ -173,7 +185,12 @@ class BridgeClient {
   void _onData(dynamic raw) {
     try {
       final decoded = jsonDecode(raw as String);
-      if (decoded is Map<String, dynamic>) _messageController.add(decoded);
+      if (decoded is Map<String, dynamic>) {
+        if (decoded['type'] == MessageType.presence) {
+          editorPresent.value = ((decoded['editors'] as num?) ?? 0) > 0;
+        }
+        _messageController.add(decoded);
+      }
     } catch (e) {
       debugPrint('[bridge] failed to decode message: $e');
     }
@@ -183,6 +200,7 @@ class BridgeClient {
     _pingTimer?.cancel();
     _sub?.cancel();
     _channel = null;
+    editorPresent.value = false; // lost the connection → no editor → not editable
     if (_disposed) return;
     _statusNotifier.value = BridgeStatus.disconnected;
     if (config.autoReconnect) {

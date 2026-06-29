@@ -72,6 +72,11 @@ class EditRenderHooks extends RenderHooks {
 
   @override
   Widget decorate(BuildContext context, LayoutNode node, ContainerNode? parent, Widget child) {
+    // No dashboard editor connected → the app behaves like a normal app: no
+    // selection, no outlines, no drag handles. (Re-enables instantly when an
+    // editor reconnects — RemoteUI rebuilds on editorPresent changes.)
+    if (!c.client.editorPresent.value) return child;
+
     final isRoot = parent == null;
     final inFree = parent?.mode == ContainerMode.free;
 
@@ -125,7 +130,7 @@ class EditRenderHooks extends RenderHooks {
   @override
   List<Widget> assembleFlow(BuildContext context, ContainerNode parent, Axis axis,
       List<LayoutNode> nodes, List<Widget> widgets) {
-    if (!chrome) return super.assembleFlow(context, parent, axis, nodes, widgets);
+    if (!chrome || !c.client.editorPresent.value) return super.assembleFlow(context, parent, axis, nodes, widgets);
     final expand = parent.props.expandChildren ?? true;
     final out = <Widget>[];
     for (var i = 0; i <= nodes.length; i++) {
@@ -140,7 +145,7 @@ class EditRenderHooks extends RenderHooks {
 
   @override
   Widget decorateFreeSurface(BuildContext context, ContainerNode parent, Widget stack) {
-    if (!chrome) return stack;
+    if (!chrome || !c.client.editorPresent.value) return stack;
     return _FreeDropSurface(controller: c, parentId: parent.id, child: stack);
   }
 }

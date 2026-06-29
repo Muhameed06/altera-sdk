@@ -16,6 +16,7 @@ class MessageType {
   static const capture = 'capture'; // app -> server -> editors: auto-captured text/elements
   static const setCapture = 'set_capture'; // editor -> server -> app: text/visibility overrides
   static const autoLayout = 'auto_layout'; // app -> server -> editors: structural tree scanned from the live render tree (RemoteApp)
+  static const appFrame = 'app_frame'; // app -> server -> editors: streamed PNG screenshot of the running app (live mirror, no adb)
   static const ping = 'ping';
 
   static const stateSync = 'state_sync';

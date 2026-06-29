@@ -4,10 +4,12 @@ Server-driven UI for Flutter. **Wrap your app once** and edit its live UI — te
 layout, order, colours, visibility — from the [ALTERA](https://altera-82d02.web.app)
 dashboard. Ship changes in seconds, with no App Store review and no release.
 
-- 🎁 **One wrapper does everything** — `RemoteScaffoldApp` builds your
-  `MaterialApp`, bottom navigation and a scaffold per page, then **recursively
-  decomposes your widget tree** so every `Text` (even inside a card) becomes an
-  individually editable node. No `RemoteNode`, no manual ids, no per-screen setup.
+- 🎁 **New app?** `RemoteScaffoldApp` builds your `MaterialApp`, bottom navigation
+  and a scaffold per page, then **recursively decomposes your widget tree** so
+  every `Text` (even inside a card) becomes editable. No ids, no per-screen setup.
+- 🧰 **Existing app?** Run `dart run live_ui_bridge:wrap` — it scans your screens
+  and wraps them with `RemoteUI.auto`, keeping your **real** widgets but letting
+  you reorder / hide / restyle them from the dashboard, live.
 - 🧪 A/B test, roll out by %, schedule releases, diff and roll back — all driven
   from the dashboard.
 - 🔌 Connects over WebSocket with a single API key.
@@ -64,6 +66,60 @@ real time, on every connected device.
 > nodes. A custom `StatelessWidget` class is treated as one opaque block — extract
 > it into a helper function returning standard widgets if you want its inner text
 > editable. See [`example/lib/main.dart`](example/lib/main.dart).
+
+## Already have an app? Wrap your pages
+
+`RemoteScaffoldApp` is for new apps where ALTERA owns the screen. For an
+**existing** app, wrap each page's children with `RemoteUI.auto` — your real
+widgets keep rendering and working; the dashboard just controls their order and
+visibility, live.
+
+### The fast way — the wrap tool
+
+From your app's root directory:
+
+```bash
+# scan + report which screens can be wrapped (no changes)
+dart run live_ui_bridge:wrap
+
+# auto-wrap the clean screens (saves a .bak of every file it edits)
+dart run live_ui_bridge:wrap --apply --key=ak_your_key_here
+```
+
+It writes a shared `lib/altera_config.dart`, auto-wraps the screens it can do
+safely, and prints a copy-paste one-liner for the rest.
+
+### By hand
+
+```dart
+import 'package:live_ui_bridge/live_ui_bridge.dart';
+
+// In a screen's build(), wrap its children list once:
+RemoteUI.auto(
+  screen: 'home',
+  editable: true,
+  blocksOnly: true,            // render your real widgets as reorderable blocks
+  config: const BridgeConfig(
+    url: 'wss://altera-backend-1075554014912.europe-west1.run.app',
+    appId: 'app',
+    token: 'app-secret-dev',
+    apiKey: 'ak_your_key_here',
+    environment: 'draft',
+  ),
+  children: [
+    yourHeader,    // your existing widgets — unchanged
+    yourCardList,
+    yourFooter,
+  ],
+);
+```
+
+> `blocksOnly: true` keeps each section pixel-perfect (rendered as your real
+> widget) and reorderable as a whole block. Drop it to also decompose standard
+> `Column`/`Row`/`Text` for finer, per-element editing.
+>
+> **Edit mode only shows while the dashboard is open** — close it and the app
+> behaves like a normal app; reopen and editing returns.
 
 ## Configuration — `RemoteAppConfig`
 

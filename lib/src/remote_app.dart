@@ -1,4 +1,6 @@
 import 'dart:async';
+import 'dart:convert';
+import 'dart:ui' show ImageByteFormat;
 
 import 'package:flutter/rendering.dart';
 import 'package:flutter/widgets.dart';
@@ -192,9 +194,12 @@ class RemoteAppRuntimeLayer extends StatefulWidget {
 
 class _RemoteAppRuntimeLayerState extends State<RemoteAppRuntimeLayer> {
   final GlobalKey _scanKey = GlobalKey();
+  final GlobalKey _repaintKey = GlobalKey();
   RemoteAppController? _controller;
   StreamSubscription? _sub;
   Timer? _captureTimer;
+  Timer? _frameTimer;
+  bool _framing = false;
 
   /// id -> override text ('' hides the text). Applied every frame.
   final Map<String, String> _overrides = {};
@@ -221,7 +226,17 @@ class _RemoteAppRuntimeLayerState extends State<RemoteAppRuntimeLayer> {
     _sub = c.client.messages.listen(_onMessage);
     _captureTimer?.cancel();
     if (c.config.editable) {
-      _captureTimer = Timer.periodic(const Duration(seconds: 1), (_) => _capture());
+      // Each second: capture text (Content panel) AND mirror the live render
+      // tree into an editable Layers tree (Design panel). Both are defensive —
+      // a scan error must never kill text capture.
+      _captureTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+        try { _capture(); } catch (_) {}
+        try { _scanAndPush(); } catch (_) {}
+      });
+      // Stream a live screenshot of the app to the dashboard (~2.5 fps) so the
+      // running app mirrors in the browser — no adb, works on cloud/any device.
+      _frameTimer?.cancel();
+      _frameTimer = Timer.periodic(const Duration(milliseconds: 400), (_) => _sendFrame());
     }
   }
 
@@ -252,19 +267,131 @@ class _RemoteAppRuntimeLayerState extends State<RemoteAppRuntimeLayer> {
       final id = 'txt#${i++}';
       if (!p.attached || !p.hasSize) return;
       final r = p.localToGlobal(Offset.zero) & p.size;
+      // Report the UNDERLYING text (the original), not the overridden value. So
+      // a hidden item (override = '') or an edited one still shows up in the
+      // dashboard list with its real copy — and stays restorable ("Show"/Undo).
+      final shown = p.text.toPlainText();
       items.add({
         'id': id,
-        'text': p.text.toPlainText(),
+        'text': _originals[id] ?? shown,
         'rect': {'left': r.left, 'top': r.top, 'width': r.width, 'height': r.height},
       });
     });
     _controller!.client.reportCapture({'screen': _screen, 'items': items});
   }
 
+  // ── P3: recursive structural scan ──────────────────────────────────────────
+  // Mirror the live render tree into an editable Layers tree from ONE wrapper —
+  // no per-widget code. Pushed per current screen; the backend stores/broadcasts
+  // only when the structure actually changes (no churn, no clobbering edits).
+  // Limit: it's a live MIRROR — text/visibility edits round-trip via the Content
+  // (capture) channel; structural reorder of the dev's native widgets can't be
+  // pushed back (Flutter rebuilds them), so reorders get re-scanned over.
+  int _autoCount = 0;
+
+  void _scanAndPush() {
+    final root = _scanKey.currentContext?.findRenderObject();
+    if (root == null || _controller == null) return;
+    _autoCount = 0;
+    final scanned = _scanNode(root, 'n');
+    final tree = (scanned != null && scanned['kind'] == 'container')
+        ? scanned
+        : <String, dynamic>{
+            'id': 'n', 'kind': 'container', 'type': 'column', 'mode': 'flow',
+            'props': const <String, dynamic>{}, 'children': scanned == null ? <dynamic>[] : [scanned],
+          };
+    _controller!.client.reportAutoLayout({'screen': _screen, 'tree': tree});
+  }
+
+  Map<String, dynamic>? _scanNode(RenderObject ro, String path) {
+    if (_autoCount > 240) return null; // safety cap on tree size
+
+    if (ro is RenderParagraph) {
+      final t = ro.text.toPlainText();
+      if (t.trim().isEmpty) return null;
+      _autoCount++;
+      final span = ro.text;
+      final style = span is TextSpan ? span.style : null;
+      return {
+        'id': path, 'kind': 'text', 'text': t,
+        if (style != null) 'style': _textStyleJson(style),
+      };
+    }
+    if (ro is RenderImage) { _autoCount++; return {'id': path, 'kind': 'leaf', 'ref': 'image'}; }
+
+    // Gather meaningful children first (depth-first).
+    final children = <Map<String, dynamic>>[];
+    var idx = 0;
+    ro.visitChildren((c) {
+      final n = _scanNode(c, '$path/$idx');
+      idx++;
+      if (n != null) children.add(n);
+    });
+
+    if (ro is RenderFlex) {
+      if (children.isEmpty) return null;
+      _autoCount++;
+      return {
+        'id': path, 'kind': 'container',
+        'type': ro.direction == Axis.horizontal ? 'row' : 'column',
+        'mode': 'flow', 'props': const <String, dynamic>{}, 'children': children,
+      };
+    }
+    if (ro is RenderStack) {
+      if (children.isEmpty) return null;
+      _autoCount++;
+      return {'id': path, 'kind': 'container', 'type': 'stack', 'mode': 'flow', 'props': const <String, dynamic>{}, 'children': children};
+    }
+
+    // Generic wrapper: collapse a single child (Padding/Center/DecoratedBox…),
+    // group several into a column. Drop empties.
+    if (children.isEmpty) return null;
+    if (children.length == 1) return children.first;
+    _autoCount++;
+    return {'id': path, 'kind': 'container', 'type': 'column', 'mode': 'flow', 'props': const <String, dynamic>{}, 'children': children};
+  }
+
+  // Capture the app's current frame as a PNG and stream it to the dashboard.
+  Future<void> _sendFrame() async {
+    if (_framing || _controller == null) return;
+    final ro = _repaintKey.currentContext?.findRenderObject();
+    if (ro is! RenderRepaintBoundary) return;
+    if (ro.debugNeedsPaint || !ro.hasSize) return; // not ready this frame
+    _framing = true;
+    try {
+      // Downscale a touch (0.85) to keep frames small over the wire.
+      final image = await ro.toImage(pixelRatio: 0.85);
+      final bytes = await image.toByteData(format: ImageByteFormat.png);
+      image.dispose();
+      if (bytes == null) return;
+      _controller?.client.reportAppFrame({
+        'screen': _screen,
+        'png': base64Encode(bytes.buffer.asUint8List()),
+        'w': ro.size.width,
+        'h': ro.size.height,
+      });
+    } catch (_) {
+      // Transient (mid-frame, detached) — next tick retries.
+    } finally {
+      _framing = false;
+    }
+  }
+
+  Map<String, dynamic> _textStyleJson(TextStyle s) {
+    final m = <String, dynamic>{};
+    if (s.fontSize != null) m['fontSize'] = s.fontSize;
+    final c = s.color;
+    if (c != null) m['textColor'] = '#${(c.toARGB32() & 0xFFFFFF).toRadixString(16).padLeft(6, '0')}';
+    final w = s.fontWeight;
+    if (w != null) m['fontWeight'] = 'w${(w.index + 1) * 100}';
+    return m;
+  }
+
   void _syncOverrides() {
     if (_overrides.isEmpty && _originals.isEmpty) return;
     final root = _scanKey.currentContext?.findRenderObject();
     if (root == null) return;
+    var changed = false;
     var i = 0;
     _eachText(root, (p) {
       final id = 'txt#${i++}';
@@ -273,13 +400,17 @@ class _RemoteAppRuntimeLayerState extends State<RemoteAppRuntimeLayer> {
         // Save the original once, then keep the override applied.
         _originals.putIfAbsent(id, () => p.text.toPlainText());
         final ov = _overrides[id]!;
-        if (p.text.toPlainText() != ov) p.text = TextSpan(text: ov, style: style);
+        if (p.text.toPlainText() != ov) { p.text = TextSpan(text: ov, style: style); changed = true; }
       } else if (_originals.containsKey(id)) {
         // Override was removed (Undo) → restore the original text.
         final orig = _originals.remove(id)!;
-        if (p.text.toPlainText() != orig) p.text = TextSpan(text: orig, style: style);
+        if (p.text.toPlainText() != orig) { p.text = TextSpan(text: orig, style: style); changed = true; }
       }
     });
+    // We mutated render objects INSIDE a persistent (post-paint) frame callback,
+    // so the change won't appear until another frame is produced. Schedule one
+    // explicitly — otherwise the edit only shows on the user's NEXT action.
+    if (changed) WidgetsBinding.instance.scheduleFrame();
   }
 
   void _onTapUp(PointerUpEvent e) {
@@ -300,6 +431,7 @@ class _RemoteAppRuntimeLayerState extends State<RemoteAppRuntimeLayer> {
   void dispose() {
     _sub?.cancel();
     _captureTimer?.cancel();
+    _frameTimer?.cancel();
     super.dispose();
   }
 
@@ -311,8 +443,10 @@ class _RemoteAppRuntimeLayerState extends State<RemoteAppRuntimeLayer> {
 
     Widget content = KeyedSubtree(key: _scanKey, child: widget.child);
 
-    // Tap-to-select overlay (edit mode only) — non-blocking so the app stays usable.
+    // In edit mode, wrap in a RepaintBoundary so we can screenshot the app for
+    // the dashboard's live mirror, and a Listener for tap-to-select.
     if (controller.config.editable) {
+      content = RepaintBoundary(key: _repaintKey, child: content);
       content = Listener(behavior: HitTestBehavior.translucent, onPointerUp: _onTapUp, child: content);
     }
 

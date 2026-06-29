@@ -72,10 +72,14 @@ class RemoteUI extends StatefulWidget {
     bool editable = false,
     bool showEditChrome = true,
     RenderHooks? hooks,
+    BuildContext? context,
+    bool deep = true,
+    bool blocksOnly = false,
     Key? key,
   }) {
     final leaves = <RemoteNode>[]; // unknown widgets → registered + rendered as-is
     final used = <String>{};
+    var deepCount = 0; // cap how many custom widgets we expand, to bound work
 
     String mkId(Widget w, String fallback) {
       final k = w.key;
@@ -156,13 +160,45 @@ class RemoteUI extends StatefulWidget {
       if (w is SizedBox) {
         return PrimitiveNode(id: mkId(w, 'sp_$path'), prim: 'spacer', data: {'size': w.height ?? w.width ?? 8.0});
       }
+      // Deep mode: transparently expand a custom StatelessWidget into ITS OWN
+      // build output, so every text/row/column inside that class becomes
+      // individually editable too — wrap the class, edit everything inside it.
+      if (deep && context != null && w is StatelessWidget && deepCount < 80) {
+        try {
+          deepCount++;
+          // ignore: invalid_use_of_protected_member
+          final built = w.build(context);
+          return decompose(built, '${path}_x');
+        } catch (_) {
+          // Can't build standalone (needs its own element/state) → stays a leaf.
+        }
+      }
       // Unknown / custom widget → opaque leaf (renders your original widget).
       final id = mkId(w, '${w.runtimeType}_$path');
       leaves.add(RemoteNode(id: id, child: w));
       return LeafNode(id: 'n_$id', ref: id);
     };
 
-    final topNodes = decomposeChildren(children, 's');
+    // blocksOnly: keep each top-level child as an opaque leaf rendered exactly
+    // as your real widget (no lossy decomposition) — so complex sections look
+    // pixel-perfect and are reorderable/hideable as whole blocks.
+    List<LayoutNode> topLevel() {
+      if (!blocksOnly) return decomposeChildren(children, 's');
+      final out = <LayoutNode>[];
+      for (var i = 0; i < children.length; i++) {
+        final w = children[i];
+        if (w is SizedBox) {
+          out.add(PrimitiveNode(id: mkId(w, 'sp_$i'), prim: 'spacer', data: {'size': w.height ?? w.width ?? 8.0}));
+          continue;
+        }
+        final id = mkId(w, '${w.runtimeType}_$i');
+        leaves.add(RemoteNode(id: id, child: w));
+        out.add(LeafNode(id: 'n_$id', ref: id));
+      }
+      return out;
+    }
+
+    final topNodes = topLevel();
 
     ContainerNode layout(List<String> palette) => ContainerNode(
           id: 'root',
@@ -380,7 +416,9 @@ class _RemoteUIState extends State<RemoteUI> {
   @override
   Widget build(BuildContext context) {
     return AnimatedBuilder(
-      animation: _state,
+      // Rebuild on layout changes AND when a dashboard editor connects/leaves,
+      // so edit chrome appears/disappears the moment the dashboard opens/closes.
+      animation: Listenable.merge([_state, _client.editorPresent]),
       builder: (context, _) {
         final tree = _state.treeFor(widget.screen);
         if (tree == null) return const SizedBox.shrink();
