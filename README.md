@@ -1,69 +1,97 @@
-# live_ui_bridge
+# ALTERA SDK — `live_ui_bridge`
 
-Flutter SDK that exposes a widget tree as a remotely editable layout graph,
-synced over WebSockets.
+Server-driven UI for Flutter. **Wrap your app once** and edit its live UI — text,
+layout, order, colours, visibility — from the [ALTERA](https://altera-82d02.web.app)
+dashboard. Ship changes in seconds, with no App Store review and no release.
+
+- 🎁 **One wrapper does everything** — `RemoteScaffoldApp` builds your
+  `MaterialApp`, bottom navigation and a scaffold per page, then **recursively
+  decomposes your widget tree** so every `Text` (even inside a card) becomes an
+  individually editable node. No `RemoteNode`, no manual ids, no per-screen setup.
+- 🧪 A/B test, roll out by %, schedule releases, diff and roll back — all driven
+  from the dashboard.
+- 🔌 Connects over WebSocket with a single API key.
 
 ## Install
 
 ```yaml
 dependencies:
   live_ui_bridge:
-    path: ../flutter_sdk   # or a git/pub ref
+    git:
+      url: https://github.com/Muhameed06/altera-sdk.git
 ```
 
-## Usage
+Then `flutter pub get`.
 
-Wrap a screen's components in `RemoteUI`, giving each a `RemoteNode` with a
-stable id:
+## Quick start — the one wrapper
 
 ```dart
-RemoteUI(
-  screen: 'home',
-  config: const BridgeConfig(
-    url: 'ws://localhost:8080',
-    appId: 'home-demo',
-    token: 'app-secret-dev',
-  ),
-  builder: (context, children) => ListView(children: children),
-  nodes: const [
-    RemoteNode(id: 'featured',  child: FeaturedSection()),
-    RemoteNode(id: 'music',     child: MusicSection()),
-    RemoteNode(id: 'favorites', child: FavoritesSection()),
-  ],
-)
+import 'package:flutter/material.dart';
+import 'package:live_ui_bridge/live_ui_bridge.dart';
+
+void main() => runApp(
+      RemoteScaffoldApp(
+        // Grab your apiKey from the ALTERA dashboard → Setup page.
+        config: const RemoteAppConfig(apiKey: 'ak_your_key_here', environment: 'draft', editable: true),
+        theme: ThemeData(useMaterial3: true, colorSchemeSeed: const Color(0xFF7C3AED)),
+        pages: [
+          RemotePageDef(
+            id: 'home',
+            icon: Icons.home_rounded,
+            label: 'Home',
+            sections: [
+              const Text('Welcome', style: TextStyle(fontSize: 28, fontWeight: FontWeight.bold)),
+              const Text('Edit any of this live from your dashboard.'),
+            ],
+          ),
+          RemotePageDef(
+            id: 'profile',
+            icon: Icons.person_rounded,
+            label: 'Profile',
+            sections: const [Text('Your Profile')],
+          ),
+        ],
+      ),
+    );
 ```
 
-The web editor can now reorder and hide/show these sections in real time.
+That's the whole integration. Open the dashboard and your pages, every text node
+and the bottom bar are now editable — reorder, hide, restyle and rewrite copy in
+real time, on every connected device.
 
-## Pieces
+> **Tip:** build your sections from **standard** widgets (`Container`, `Column`,
+> `Row`, `Text`, `Card`, `Padding`…). The SDK decomposes those into editable
+> nodes. A custom `StatelessWidget` class is treated as one opaque block — extract
+> it into a helper function returning standard widgets if you want its inner text
+> editable. See [`example/lib/main.dart`](example/lib/main.dart).
 
-| API            | Role                                                              |
-| -------------- | ---------------------------------------------------------------- |
-| `RemoteUI`     | Root container: registers nodes, connects, applies layout diffs, rebuilds in order |
-| `RemoteNode`   | Wraps a component with a stable `id`                             |
-| `LayoutState`  | `ChangeNotifier` holding `screen → order + hidden`; the layout source of truth |
-| `NodeRegistry` | Maps node ids → declared `RemoteNode`s (dup-id detection)        |
-| `BridgeClient` | WebSocket client (connect/register/auto-reconnect/ping)         |
+## Configuration — `RemoteAppConfig`
 
-`RemoteUI` creates its own `LayoutState` + `BridgeClient` by default, or you can
-inject shared ones to drive it from **Provider** or **Riverpod**.
+| Field         | Default                | Notes                                                        |
+| ------------- | ---------------------- | ------------------------------------------------------------ |
+| `apiKey`      | —                      | Hosted accounts: your key resolves the tenant + endpoint.    |
+| `url`         | `ws://localhost:8080`  | WebSocket endpoint (for self-hosting the backend).           |
+| `token`       | `app-secret-dev`       | Auth token when self-hosting (ignored when `apiKey` is set). |
+| `environment` | `production`           | `draft` while editing, `staging`, or `production` when live. |
+| `editable`    | `false`                | `true` lets the dashboard select nodes + read geometry.      |
 
-## How layout updates apply
-
-1. On mount, `RemoteUI` declares its node ids → `LayoutState.registerDeclaredOrder`
-   and reports them to the backend (`connect_app` with `order`).
-2. The server returns the authoritative layout (`state_sync`); editor edits
-   arrive as `layout_patch`.
-3. `LayoutState` updates and notifies → `RemoteUI` rebuilds children in the new
-   visible order. Server order wins; newly added widgets are appended, removed
-   widgets are dropped.
-
-## Tests
+## Run the example
 
 ```bash
-flutter test                                   # LayoutState unit tests
-flutter test --tags integration \              # live e2e (needs backend running)
-  test/integration_bridge_test.dart
+cd example
+flutter run --dart-define=ALTERA_API_KEY=ak_your_key_here
+# self-hosting the backend on an emulator? add:
+#   --dart-define=ALTERA_URL=ws://10.0.2.2:8080
 ```
 
-See `example/` for a complete runnable app.
+## Lower-level APIs (optional)
+
+`RemoteScaffoldApp` is the recommended entry point. If you need finer control the
+underlying pieces are also exported: `RemoteScaffold` (a single server-driven
+page), `RemoteBottomBar`, `RemoteAppBar`, `RemoteNavigator`, `RemoteTheme`,
+`BridgeClient`, and `RemoteApp` (whole-app text capture). Most apps never need
+them.
+
+## License
+
+See the repository for license terms.

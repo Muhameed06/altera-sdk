@@ -1,7 +1,9 @@
 name: live_ui_bridge
-description: Runtime UI bridge SDK that exposes a Flutter widget tree as a remotely editable layout graph, synced over WebSockets.
+description: ALTERA SDK — wrap a Flutter app once and edit its live UI (text, layout, order, A/B tests) from a dashboard over WebSockets.
 version: 0.1.0
 publish_to: none
+homepage: https://github.com/Muhameed06/altera-sdk
+repository: https://github.com/Muhameed06/altera-sdk
 
 environment:
   sdk: ">=3.4.0 <4.0.0"
