@@ -196,6 +196,7 @@ class LayoutTreeRenderer {
         final th = (d['thickness'] as num?)?.toDouble() ?? 1;
         return Divider(thickness: th, height: th + 16);
       case 'spacer':
+        if (d['flex'] == true) return const Spacer(); // a real flex spacer (preserves spread)
         final sz = (d['size'] as num?)?.toDouble() ?? 16;
         return SizedBox(height: sz, width: sz);
       case 'icon':

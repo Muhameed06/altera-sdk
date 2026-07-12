@@ -111,7 +111,7 @@ class BridgeClient {
   /// Tell the server which leaf widgets this app can render for [screen] (the
   /// palette) plus an optional default [tree]. Called by RemoteUI as it mounts;
   /// replayed automatically across reconnects.
-  void registerScreen(String screen, List<String> palette, {Map<String, dynamic>? tree}) {
+  void registerScreen(String screen, List<String> palette, {Map<String, dynamic>? tree, String? kind}) {
     _declaredScreens[screen] = {
       'appId': config.appId,
       'token': config.token,
@@ -122,6 +122,7 @@ class BridgeClient {
       'screen': screen,
       'palette': palette,
       if (tree != null) 'tree': tree,
+      if (kind != null) 'kind': kind, // 'page' | 'widget' — for the dashboard split
     };
     _send({
       'type': MessageType.connectApp,

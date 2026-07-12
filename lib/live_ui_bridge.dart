@@ -43,6 +43,7 @@ export 'src/remote_theme.dart' show RemoteTheme;
 export 'src/remote_app.dart'
     show RemoteApp, RemoteAppConfig, RemoteAppController, RemoteAppNavigatorObserver, RemoteAppRuntimeLayer;
 export 'src/protocol.dart' show BridgeConfig, MessageType;
+export 'src/altera_mirror.dart' show AlteraMirror;
 export 'src/registry.dart' show NodeRegistry;
 export 'src/remote_node.dart' show RemoteNode;
 export 'src/remote_app_bar.dart' show RemoteAppBar;

@@ -11,3 +11,8 @@ pubspec.lock
 *.iml
 .vscode/
 **/.DS_Store
+
+# ALTERA — generated per-app config holds your API key; never commit it.
+**/altera_config.dart
+# Backups written by `dart run live_ui_bridge:wrap`.
+*.bak

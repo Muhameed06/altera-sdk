@@ -1,7 +1,7 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/widgets.dart';
-import 'package:flutter/material.dart' show Card;
 
 import 'package:flutter/foundation.dart' show kIsWeb;
 
@@ -38,6 +38,7 @@ class RemoteUI extends StatefulWidget {
     this.editable = false,
     this.showEditChrome = true,
     this.hooks,
+    this.kind = 'page',
     super.key,
   }) : assert(config != null || client != null,
             'Provide either a BridgeConfig or a pre-built BridgeClient.');
@@ -75,11 +76,12 @@ class RemoteUI extends StatefulWidget {
     BuildContext? context,
     bool deep = true,
     bool blocksOnly = false,
+    String kind = 'page',
+    String axis = 'column',
     Key? key,
   }) {
     final leaves = <RemoteNode>[]; // unknown widgets → registered + rendered as-is
     final used = <String>{};
-    var deepCount = 0; // cap how many custom widgets we expand, to bound work
 
     String mkId(Widget w, String fallback) {
       final k = w.key;
@@ -117,63 +119,70 @@ class RemoteUI extends StatefulWidget {
       if (w is Text && w.data != null) {
         return TextNode(id: mkId(w, 'txt_$path'), text: w.data!, style: _styleOfText(w.style));
       }
-      if (w is Flex) return flexNode(w, path);
-      if (w is Container) {
-        final style = _containerStyle(w);
-        final pad = _padOf(w.padding);
-        final child = w.child;
-        if (child is Flex) return flexNode(child, path, style: style, padding: pad);
-        return ContainerNode(
-          id: mkId(w, 'box_$path'),
-          type: ContainerType.column,
-          props: ContainerProps(padding: pad, crossAxis: 'stretch'),
-          style: style,
-          children: child == null ? const [] : [decompose(child, '${path}_0')],
-        );
+      // Spacer → a spacer node. (A raw Spacer/Expanded rendered as a leaf would
+      // crash with unbounded constraints — that was the play-button bug.)
+      if (w is Spacer) {
+        return PrimitiveNode(id: mkId(w, 'sp_$path'), prim: 'spacer', data: const {'size': 16.0});
       }
-      if (w is Card) {
-        return ContainerNode(
-          id: mkId(w, 'card_$path'),
-          type: ContainerType.column,
-          props: const ContainerProps(padding: 12),
-          style: const NodeStyle(radius: 12),
-          children: w.child == null ? const [] : [decompose(w.child!, '${path}_0')],
-        );
+      // Expanded / Flexible → render the child WITHOUT the flex wrapper, so it
+      // never hits an unbounded-constraint crash inside our column.
+      if (w is Flexible) {
+        return decompose(w.child, '${path}_0');
       }
+      if (w is SizedBox && w.child == null) {
+        return PrimitiveNode(id: mkId(w, 'sp_$path'), prim: 'spacer', data: {'size': w.height ?? w.width ?? 8.0});
+      }
+      // A SizedBox WITH a child keeps its exact size around the child → render it
+      // as a faithful leaf (falls through below), so e.g. a 180-wide button stays 180.
+      //
+      // ── Recurse EVERY structural/layout widget so each one becomes its own
+      // editable node and text at any depth stays individually editable — while
+      // its look (background, corner radius, padding) is preserved via node style.
+      // Only truly complex/interactive widgets — buttons, custom widgets, images,
+      // Stack, and boxes with shadows/gradients/borders — stay opaque leaves, so
+      // nothing visually complex is ever rebuilt (no overflow / overlay breakage).
+      if (w is Flex) return flexNode(w, path); // Column AND Row
       if (w is Padding) {
+        final c = w.child;
+        if (c == null) return PrimitiveNode(id: mkId(w, 'sp_$path'), prim: 'spacer', data: const {'size': 0.0});
         return ContainerNode(
           id: mkId(w, 'pad_$path'),
           type: ContainerType.column,
           props: ContainerProps(padding: _padOf(w.padding), crossAxis: 'stretch'),
-          children: w.child == null ? const [] : [decompose(w.child!, '${path}_0')],
+          children: [decompose(c, '${path}_0')],
         );
       }
-      if (w is Center || w is Align) {
-        final child = (w as dynamic).child as Widget?;
+      if (w is Align && w.child != null) {
+        // Center is an Align — keep the horizontal alignment, recurse the child.
         return ContainerNode(
-          id: mkId(w, 'al_$path'),
+          id: mkId(w, 'align_$path'),
           type: ContainerType.column,
-          props: const ContainerProps(crossAxis: 'center'),
-          children: child == null ? const [] : [decompose(child, '${path}_0')],
+          props: ContainerProps(crossAxis: _alignCross(w.alignment), mainAxis: 'center'),
+          children: [decompose(w.child!, '${path}_0')],
         );
       }
-      if (w is SizedBox) {
-        return PrimitiveNode(id: mkId(w, 'sp_$path'), prim: 'spacer', data: {'size': w.height ?? w.width ?? 8.0});
+      if (w is ColoredBox && w.child != null) {
+        return ContainerNode(
+          id: mkId(w, 'box_$path'),
+          type: ContainerType.column,
+          props: const ContainerProps(crossAxis: 'stretch'),
+          style: NodeStyle(background: _hex(w.color)),
+          children: [decompose(w.child!, '${path}_0')],
+        );
       }
-      // Deep mode: transparently expand a custom StatelessWidget into ITS OWN
-      // build output, so every text/row/column inside that class becomes
-      // individually editable too — wrap the class, edit everything inside it.
-      if (deep && context != null && w is StatelessWidget && deepCount < 80) {
-        try {
-          deepCount++;
-          // ignore: invalid_use_of_protected_member
-          final built = w.build(context);
-          return decompose(built, '${path}_x');
-        } catch (_) {
-          // Can't build standalone (needs its own element/state) → stays a leaf.
-        }
+      // Simple Container / DecoratedBox we can faithfully reproduce (solid fill +
+      // radius + padding + margin, no shadow/gradient/border/constraints) → recurse
+      // so their children stay editable; anything richer falls through to a leaf.
+      final box = _simpleBox(w);
+      if (box != null) {
+        return ContainerNode(
+          id: mkId(w, 'cont_$path'),
+          type: ContainerType.column,
+          props: ContainerProps(padding: box.padding, crossAxis: box.cross ?? 'stretch'),
+          style: box.style,
+          children: [decompose(box.child, '${path}_0')],
+        );
       }
-      // Unknown / custom widget → opaque leaf (renders your original widget).
       final id = mkId(w, '${w.runtimeType}_$path');
       leaves.add(RemoteNode(id: id, child: w));
       return LeafNode(id: 'n_$id', ref: id);
@@ -202,8 +211,10 @@ class RemoteUI extends StatefulWidget {
 
     ContainerNode layout(List<String> palette) => ContainerNode(
           id: 'root',
-          type: ContainerType.column,
-          props: const ContainerProps(gap: 12, padding: 4, crossAxis: 'stretch'),
+          type: axis == 'row' ? ContainerType.row : ContainerType.column,
+          // blocksOnly keeps your real widgets (incl. their own spacers), so add
+          // NO gap/padding — otherwise the layout grows extra space.
+          props: ContainerProps(gap: blocksOnly ? 0 : 12, padding: blocksOnly ? 0 : 4, crossAxis: 'stretch'),
           children: topNodes,
         );
 
@@ -218,22 +229,9 @@ class RemoteUI extends StatefulWidget {
       editable: editable,
       showEditChrome: showEditChrome,
       hooks: hooks,
+      kind: kind,
       key: key,
     );
-  }
-
-  static NodeStyle? _containerStyle(Container c) {
-    String? bg;
-    double? radius;
-    final d = c.decoration;
-    if (d is BoxDecoration) {
-      bg = _hex(d.color);
-      final br = d.borderRadius;
-      if (br is BorderRadius) radius = br.topLeft.x;
-    }
-    bg ??= _hex(c.color);
-    if (bg == null && radius == null) return null;
-    return NodeStyle(background: bg, radius: radius);
   }
 
   static double? _padOf(EdgeInsetsGeometry? e) {
@@ -242,6 +240,65 @@ class RemoteUI extends StatefulWidget {
       if (e.top != 0) return e.top;
     }
     return null;
+  }
+
+  // Map an alignment's horizontal component to a cross-axis value.
+  static String? _alignCross(AlignmentGeometry? a) {
+    if (a is Alignment) {
+      if (a.x < 0) return 'start';
+      if (a.x > 0) return 'end';
+      return 'center';
+    }
+    return null;
+  }
+
+  // If [w] is a Container/DecoratedBox we can faithfully reproduce as a styled
+  // container node (solid fill + radius + padding/margin, single child, NO
+  // shadow/gradient/border/constraints/transform), return its parts; else null
+  // so the caller keeps it as an opaque leaf.
+  static ({NodeStyle? style, double? padding, String? cross, Widget child})? _simpleBox(Widget w) {
+    Widget? child;
+    Color? bg;
+    double? radius;
+    double? padding;
+    double? margin;
+    String? cross;
+    if (w is Container) {
+      child = w.child;
+      if (child == null) return null;
+      if (w.transform != null || w.constraints != null || w.foregroundDecoration != null) return null;
+      bg = w.color;
+      final dec = w.decoration;
+      if (dec != null) {
+        if (dec is! BoxDecoration) return null;
+        if (dec.boxShadow != null || dec.gradient != null || dec.image != null || dec.border != null || dec.shape != BoxShape.rectangle) {
+          return null;
+        }
+        bg ??= dec.color;
+        final br = dec.borderRadius;
+        if (br is BorderRadius) radius = br.topLeft.x;
+      }
+      padding = _padOf(w.padding);
+      margin = _padOf(w.margin);
+      cross = _alignCross(w.alignment);
+    } else if (w is DecoratedBox) {
+      child = w.child;
+      if (child == null) return null;
+      final dec = w.decoration;
+      if (dec is! BoxDecoration) return null;
+      if (dec.boxShadow != null || dec.gradient != null || dec.image != null || dec.border != null || dec.shape != BoxShape.rectangle) {
+        return null;
+      }
+      bg = dec.color;
+      final br = dec.borderRadius;
+      if (br is BorderRadius) radius = br.topLeft.x;
+    } else {
+      return null;
+    }
+    final style = (bg != null || radius != null || margin != null)
+        ? NodeStyle(background: _hex(bg), radius: radius, margin: margin)
+        : null;
+    return (style: style, padding: padding, cross: cross, child: child);
   }
 
   static String? _crossOf(CrossAxisAlignment a) => switch (a) {
@@ -310,6 +367,9 @@ class RemoteUI extends StatefulWidget {
   /// installs its built-in edit overlay.
   final RenderHooks? hooks;
 
+  /// Dashboard grouping: 'page' (a screen) or 'widget' (a reusable component).
+  final String kind;
+
   @override
   State<RemoteUI> createState() => _RemoteUIState();
 }
@@ -323,6 +383,7 @@ class _RemoteUIState extends State<RemoteUI> {
   GeometryReporter? _reporter;
   late final bool _ownsClient;
   late final bool _ownsState;
+  StreamSubscription? _sub;
 
   @override
   void initState() {
@@ -352,7 +413,10 @@ class _RemoteUIState extends State<RemoteUI> {
     _renderer = LayoutTreeRenderer(registry: _registry, hooks: hooks, reporter: _reporter);
 
     _syncDeclaredNodes();
-    _client.messages.listen(_onMessage);
+    // Keep the subscription so dispose() can cancel it — otherwise a disposed
+    // RemoteUI (e.g. a nested wrapped widget rebuilt by its parent) keeps getting
+    // messages on the shared client and calls into its dead LayoutState.
+    _sub = _client.messages.listen(_onMessage);
     if (_ownsClient) _client.connect();
   }
 
@@ -367,7 +431,7 @@ class _RemoteUIState extends State<RemoteUI> {
     final defaultTree = (widget.defaultLayout ?? _columnOfAll)(palette);
     // Seed locally so the app paints immediately, then let the server confirm.
     _state.seed(widget.screen, ScreenLayout(palette: palette, tree: defaultTree));
-    _client.registerScreen(widget.screen, palette, tree: defaultTree.toJson());
+    _client.registerScreen(widget.screen, palette, tree: defaultTree.toJson(), kind: widget.kind);
   }
 
   ContainerNode _columnOfAll(List<String> palette) => ContainerNode(
@@ -378,6 +442,7 @@ class _RemoteUIState extends State<RemoteUI> {
       );
 
   void _onMessage(Map<String, dynamic> msg) {
+    if (!mounted) return;
     switch (msg['type']) {
       case MessageType.stateSync:
         final screens = msg['screens'];
@@ -406,6 +471,7 @@ class _RemoteUIState extends State<RemoteUI> {
 
   @override
   void dispose() {
+    _sub?.cancel();
     _editController?.dispose();
     _reporter?.dispose();
     if (_ownsClient) _client.dispose();

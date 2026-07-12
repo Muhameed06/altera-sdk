@@ -72,6 +72,10 @@ class EditRenderHooks extends RenderHooks {
 
   @override
   Widget decorate(BuildContext context, LayoutNode node, ContainerNode? parent, Widget child) {
+    // Never wrap a flex spacer — it must stay a direct child of the Flex, or it
+    // throws "Expanded/Spacer must be a direct child" under our chrome.
+    if (node is PrimitiveNode && node.prim == 'spacer') return child;
+
     // No dashboard editor connected → the app behaves like a normal app: no
     // selection, no outlines, no drag handles. (Re-enables instantly when an
     // editor reconnects — RemoteUI rebuilds on editorPresent changes.)
@@ -80,9 +84,10 @@ class EditRenderHooks extends RenderHooks {
     final isRoot = parent == null;
     final inFree = parent?.mode == ContainerMode.free;
 
-    Widget wrapped = _Selectable(controller: c, nodeId: node.id, showBorder: chrome, child: child);
-
-    // Chromeless: keep tap-to-select only — no outline, drag handle or pan.
+    // Always allow selection + a highlight outline on the selected node. With
+    // chrome off that's the ONLY affordance (clean: tap to highlight, no drag
+    // handles / drop zones distorting the layout).
+    Widget wrapped = _Selectable(controller: c, nodeId: node.id, showBorder: true, child: child);
     if (!chrome) return wrapped;
 
     if (isRoot) return wrapped;
@@ -177,9 +182,10 @@ class _Selectable extends StatelessWidget {
           onTap: () => controller.select(nodeId),
           child: Container(
             foregroundDecoration: BoxDecoration(
+              // Only the SELECTED element is outlined — no clutter on the rest.
               border: Border.all(
-                color: selected ? const Color(0xFF5B8CFF) : const Color(0x33FFFFFF),
-                width: selected ? 2 : 1,
+                color: selected ? const Color(0xFF5B8CFF) : Colors.transparent,
+                width: selected ? 2 : 0,
               ),
               borderRadius: BorderRadius.circular(8),
             ),
